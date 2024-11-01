@@ -1,0 +1,23 @@
+syntax = "proto3";
+package gol_proto;
+
+service ControllerHandler {
+    // Shutdown broker (server) by local controller (client)
+    rpc ShutdownBroker (Empty) returns (Empty);
+
+    // Local controller (client) pushes world to the server
+    // the server will return number of alive cells as response
+    rpc PushWorld (World) returns (AliveCellsCount);
+}
+
+message Empty { }
+
+message World {
+    uint32 width = 1;
+    uint32 height = 2;
+    bytes cellValues = 3;
+}
+
+message AliveCellsCount {
+    uint32 cellsCount = 1;
+}

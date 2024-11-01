@@ -1,0 +1,23 @@
+[package]
+name = "gol-rs-server"
+version = "1.0.0"
+edition = "2021"
+homepage = "https://uob-csa.github.io/gol-docs/"
+repository = "https://github.com/UoB-CSA/gol-rs-skeleton"
+description = "The Game of Life coursework for Bristol Computer System A unit."
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+anyhow = { version = "1.0", features = ["backtrace"] }
+bytemuck = { version = "1.18", features = ["derive"] }
+env_logger = "0.11"
+flume = "0.11"
+log = "0.4"
+num-traits = "0.2"
+prost = "0.13"
+tokio = { version = "1.40", features = ["full"] }
+tonic = "0.12"
+
+[build-dependencies]
+tonic-build = "0.12"
