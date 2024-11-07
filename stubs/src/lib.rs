@@ -3,7 +3,7 @@ use std::sync::Arc;
 use indexmap::IndexSet;
 use tokio::sync::Mutex;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Params {
     pub incoming_ip_address: String,
     pub turns: u32,
@@ -25,7 +25,7 @@ pub struct StatusReport {
     pub message: String,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct GOLRequest {
     pub params: Params,
     pub alive_cells: IndexSet<u32>,

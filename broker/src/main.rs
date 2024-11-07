@@ -386,6 +386,7 @@ pub async fn main() -> Result<(), BrokerErr> {
     let arc_broker = Arc::new(Mutex::new(broker));
     loop {
         let broker_clone = Arc::clone(&arc_broker);
+        println!("WAITING TO ACCEPT");
         match ln.accept().await {
             Ok((client, socket_address)) => {
                 println!(
@@ -394,7 +395,7 @@ pub async fn main() -> Result<(), BrokerErr> {
                 );
                 // start request listener
                 let mut client_clone = Arc::new(Mutex::new(client));
-                let handle = tokio::spawn(async move {
+                tokio::spawn(async move {
                     let mut broker_guard = broker_clone.lock().await;
                     let client = client_clone.lock().await;
                     client.readable().await.unwrap();
@@ -403,6 +404,7 @@ pub async fn main() -> Result<(), BrokerErr> {
                         let mut packet = Packet::new();
                         // read tcp stream and handle connection
                         // read header then handle function call
+                        println!("WAITING AGAIN");
                         let header = tokio::select! {
                             result = packet.read_header(&mut client_clone) => {
                                 println!("EIWEOJNKJCEN");
@@ -430,6 +432,7 @@ pub async fn main() -> Result<(), BrokerErr> {
                                             .await
                                         {
                                             Ok(payload) => {
+                                                println!("{:?}", payload);
                                                 match broker_guard
                                                     .handle_rpc_call(
                                                         FunctionCall::PROCESS_GOL,
@@ -499,6 +502,7 @@ pub async fn main() -> Result<(), BrokerErr> {
                                                 )))
                                             }
                                         }
+                                        println!("FINISHED ADDING");
                                         if id == FunctionCall::SUBSCRIBE {
                                             break Ok(Header::new());
                                         }
@@ -543,7 +547,7 @@ pub async fn main() -> Result<(), BrokerErr> {
                         };
                     }
                 });
-                handle.await.unwrap();
+               println!("LEAVING");
             }
             Err(e) => {
                 return Err(BrokerErr::ConnectionError(
@@ -564,6 +568,7 @@ impl BrokerRpcHandler for Broker {
     ) -> Result<GOLResponse, RpcError> {
         match id {
             FunctionCall::SUBSCRIBE => self.subscribe(request).await,
+            FunctionCall::PROCESS_GOL => self.process_gol(request).await,
             _ => return Err(RpcError::HandlerNotFound),
         }
     }

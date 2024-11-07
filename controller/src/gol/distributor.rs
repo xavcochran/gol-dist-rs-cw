@@ -19,6 +19,7 @@ use tokio::{
     net::{self, TcpStream},
     sync::Mutex,
 };
+use tonic::async_trait;
 
 use super::helpers::DistributorHelpers;
 
@@ -109,7 +110,7 @@ pub async fn distributor(params: Params, mut channels: DistributorChannels) -> R
             .write_data(&mut Arc::clone(&client_clone), packet_params, world_clone)
             .await
             .unwrap();
-        
+
         let header = match packet_guard
             .read_header(&mut Arc::clone(&client_clone))
             .await
@@ -292,6 +293,7 @@ async fn calculate_alive_cells(
     return alive_cells;
 }
 
+#[async_trait]
 impl DistributorHelpers for Distributor {
     /// Creates an indexed set of alive coordinates by combining the x and y value into a single value
     ///

@@ -7,6 +7,7 @@ use flume::{Receiver, Sender};
 use indexmap::IndexSet;
 use protocol::packet::DecodeError;
 use sdl2::keyboard::{KeyboardState, Keycode};
+use tonic::async_trait;
 
 use crate::{
     gol::event::State,
@@ -15,6 +16,7 @@ use crate::{
 
 use super::{event::Event, io::IoCommand, Params};
 
+#[async_trait]
 pub trait DistributorHelpers {
     fn calculate_alive_cells(world: &Vec<Vec<u8>>, params: &Params) -> Vec<CellCoord>;
     async fn handle_paused_state(

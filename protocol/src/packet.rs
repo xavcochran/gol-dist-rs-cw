@@ -209,7 +209,7 @@ impl Packet {
 		Packet::calc_coord_len_and_offset(header.image_size as u32);
             
         // initialse payload buffer to be read into
-        let mut payload_buf = BytesMut::with_capacity(header.length as usize);
+        let mut payload_buf = BytesMut::with_capacity(header.length  as usize- HEADER_SIZE_BYTES);
         let mut client_guard = client.lock().await;
         let mut bytes_read = 0;
         loop {
