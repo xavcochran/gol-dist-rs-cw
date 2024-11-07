@@ -1,13 +1,16 @@
 use crate::args::Args;
-use crate::gol::distributor::{DistributorChannels, remote_distributor};
+use crate::gol::distributor::{distributor, DistributorChannels};
 use crate::gol::event::Event;
 use crate::gol::io::{start_io, IoChannels};
+use crate::util::cell::CellValue;
 use anyhow::Result;
 use flume::{Receiver, Sender};
 use io::IoCommand;
 use sdl2::keyboard::Keycode;
 
 pub mod distributor;
+pub mod helpers;
+pub mod distributor_error;
 pub mod event;
 pub mod io;
 
@@ -31,13 +34,16 @@ pub async fn run<P: Into<Params>>(
 
     let (io_command_tx, io_command_rx) = flume::unbounded::<IoCommand>();
     let (io_idle_tx, io_idle_rx) = flume::unbounded::<bool>();
+    let (io_filename_tx, io_filename_rx) = flume::unbounded::<String>();
+    let (io_input_tx, io_input_rx) = flume::unbounded::<CellValue>();
+    let (io_output_tx, io_output_rx) = flume::unbounded::<CellValue>();
 
     let io_channels = IoChannels {
         command: Some(io_command_rx),
         idle: Some(io_idle_tx),
-        filename: None,
-        input: None,
-        output: None,
+        filename: Some(io_filename_rx),
+        input: Some(io_input_tx),
+        output: Some(io_output_rx),
     };
 
     tokio::spawn(start_io(params.clone(), io_channels));
@@ -47,12 +53,12 @@ pub async fn run<P: Into<Params>>(
         key_presses: Some(key_presses),
         io_command: Some(io_command_tx),
         io_idle: Some(io_idle_rx),
-        io_filename: None,
-        io_input: None,
-        io_output: None,
+        io_filename: Some(io_filename_tx),
+        io_input: Some(io_input_rx),
+        io_output: Some(io_output_tx),
     };
 
-    tokio::spawn(remote_distributor(params, distributor_channels)).await??;
+    tokio::spawn(distributor(params, distributor_channels)).await??;
 
     Ok(())
 }

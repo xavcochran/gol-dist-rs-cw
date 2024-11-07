@@ -1,0 +1,30 @@
+[package]
+name = "broker"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+async-trait = "0.1"
+bytemuck = { version = "1.18", features = ["derive"] }
+bytes = "1.7.2"
+clap = { version = "4.5", features = ["derive"] }
+colored = "2.1"
+crossbeam = "0.8"
+csv = "1.3"
+env_logger = "0.11"
+flume = "0.11"
+image = "0.25.2"
+indexmap = "2.6.0"
+log = "0.4"
+num-traits = "0.2"
+rayon = "1.10"
+sdl2 = { version = "0.37", features = ["unsafe_textures"] }
+serde = { version = "1.0", features = ["derive"] }
+tokio = { version = "1.40", features = ["full"] }
+stubs = { path = "../stubs" }
+protocol = { path = "../protocol" }
+rpc = { path = "../rpc" }
+
+[rust]
+debug = true
+debuginfo-level = 2

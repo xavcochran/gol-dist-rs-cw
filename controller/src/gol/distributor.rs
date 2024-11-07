@@ -1,13 +1,28 @@
-use crate::gol::event::{Event, State};
-use crate::gol::Params;
-use crate::gol::io::IoCommand;
-use crate::gol::distributor::controller_handler_client::ControllerHandlerClient;
-use crate::util::cell::CellValue;
-use crate::util::traits::AsBytes;
-use anyhow::Result;
-use flume::{Receiver, Sender};
-use sdl2::keyboard::Keycode;
 
+
+use std::sync::Arc;
+use crate::gol::distributor_error::DistributorErr;
+use crate::gol::event::{Event, State};
+use crate::gol::io::IoCommand;
+use crate::gol::Params;
+use crate::util::cell::{CellCoord, CellValue};
+use anyhow::{anyhow, Result};
+use flume::{Receiver, Sender};
+use indexmap::IndexSet;
+use protocol::coordinates::Coordinates;
+use protocol::function_call::FunctionCall;
+use protocol::packet::{DecodeError, Packet};
+use sdl2::keyboard::Keycode;
+use stubs::{GOLResponse, PacketParams};
+use tokio::{
+    self,
+    net::{self, TcpStream},
+    sync::Mutex,
+};
+
+use super::helpers::DistributorHelpers;
+
+const BYTE: usize = 8;
 pub struct DistributorChannels {
     pub events: Option<Sender<Event>>,
     pub key_presses: Option<Receiver<Keycode>>,
@@ -17,73 +32,455 @@ pub struct DistributorChannels {
     pub io_input: Option<Receiver<CellValue>>,
     pub io_output: Option<Sender<CellValue>>,
 }
-
-tonic::include_proto!("gol_proto");
-
-pub async fn remote_distributor(
-    params: Params,
-    mut channels: DistributorChannels
-) -> Result<()> {
+pub struct Distributor {}
+pub async fn distributor(params: Params, mut channels: DistributorChannels) -> Result<()> {
+    println!("STARTING");
     let events = channels.events.take().unwrap();
     let key_presses = channels.key_presses.take().unwrap();
     let io_command = channels.io_command.take().unwrap();
     let io_idle = channels.io_idle.take().unwrap();
+    let io_input = channels.io_input.take().unwrap();
+    let io_output = channels.io_output.take().unwrap();
+    let io_filename = channels.io_filename.take().unwrap();
 
+    // TODO: Create a 2D vector to store the world.
+    let packet = Arc::new(Mutex::new(Packet::new()));
     let turn = 0;
 
-    // Example for tonic gRPC
-    example_rpc_call(params.clone().server_addr).await?;
+    let (coordinate_length, _) = Distributor::calc_coord_len_and_offset(params.image_height as u32);
+    println!("PREPROCESSING");
 
-    io_command.send_async(IoCommand::IoCheckIdle).await?;
-    io_idle.recv_async().await?;
-    events.send_async(
-        Event::StateChange { completed_turns: turn, new_state: State::Quitting }).await?;
+    let mut world = Arc::new(Mutex::new(
+        Distributor::initialise_world(
+            &params,
+            io_command.clone(),
+            io_input.clone(),
+            io_filename.clone(),
+            coordinate_length,
+        )
+        .unwrap(),
+    ));
+    // TODO: Execute all turns of the Game of Life.
+
+    let (result_chan_tx, result_chan_rx) = flume::unbounded::<GOLResponse>();
+    println!("CONNECTING");
+    // Connect to broker
+    let broker_addr = "127.0.0.1:8030".to_string();
+    let client = match net::TcpStream::connect(broker_addr.clone()).await {
+        Ok(conn) => {
+            println!("Successfully connected to broker",);
+            conn
+        }
+        Err(e) => {
+            eprintln!("Error connecting to broker {}", e);
+            return Err(anyhow::Error::from(e));
+        }
+    };
+
+    events.send(Event::StateChange {
+        completed_turns: turn,
+        new_state: State::Executing,
+    })?;
+
+    //listen for incoming data
+    let broker_address_clone = broker_addr.clone();
+    let packet_clone = Arc::clone(&packet);
+    let response_sender_clone = result_chan_tx.clone();
+
+    // Call broker here
+    let packet_clone = Arc::clone(&packet);
+    let world_clone = Arc::clone(&world);
+    let client_clone = Arc::new(Mutex::new(client));
+    println!("SENDING REQUEST");
+    tokio::spawn(async move {
+        let packet_params = PacketParams {
+            turns: params.turns as u32,
+            threads: params.threads as u8,
+            y1: 0,
+            y2: 0,
+            sender_ip: broker_addr,
+            fn_call_id: FunctionCall::PROCESS_GOL,
+            msg_id: 0,
+            image_size: params.image_width as u16,
+        };
+        let mut packet_guard = packet_clone.lock().await;
+        packet_guard
+            .write_data(&mut Arc::clone(&client_clone), packet_params, world_clone)
+            .await
+            .unwrap();
+
+        let header = match packet_guard
+            .read_header(&mut Arc::clone(&client_clone))
+            .await
+        {
+            Ok(header) => header,
+            Err(e) => {
+                eprintln!("Error decoding header: {}", e);
+                return Err(anyhow!("Error decoding header: {}", e));
+            }
+        };
+        let response = match packet_guard
+            .read_gol_response_payload(&mut Arc::clone(&client_clone), header)
+            .await
+        {
+            Ok(resp) => resp,
+            Err(e) => {
+                eprintln!("Error decoding payload: {}", e);
+                return Err(anyhow!("Error decoding header: {}", e));
+            }
+        };
+        response_sender_clone.send(response).unwrap();
+        drop(packet_guard);
+        Ok(())
+    });
+
+    let mut should_quit = false;
+    while !should_quit {
+        tokio::select! {
+            response = result_chan_rx.recv_async() => {
+                let gol_resp = match response {
+                    Ok(response) => response,
+                    Err(e) => {
+                        return Err(anyhow!("Error decoding header: {}", e));
+                    }
+                };
+                world = Arc::new(Mutex::new(gol_resp.world));
+                break
+            }
+        };
+    }
+
+    /**
+     * FINALISE GAME
+     */
+    // TODO: Report the final state using FinalTurnCompleteEvent.
+    let live_cells = calculate_alive_cells(Arc::clone(&world), coordinate_length, &params).await;
+
+    let indiv_coord_len = coordinate_length / 2;
+    let mask = Distributor::generate_mask(indiv_coord_len);
+    events.send(Event::FinalTurnComplete {
+        completed_turns: turn,
+        alive: live_cells
+            .iter()
+            .map(|xy| -> CellCoord<usize> {
+                let x = (*xy >> indiv_coord_len) as usize;
+                let y = (*xy & mask) as usize;
+                CellCoord { x, y }
+            })
+            .collect(),
+    })?;
+    write_image(
+        io_command.clone(),
+        io_filename.clone(),
+        io_output.clone(),
+        io_idle.clone(),
+        events.clone(),
+        params,
+        coordinate_length,
+        live_cells,
+        turn,
+    );
+    // Make sure that the Io has finished any output before exiting.
+    io_command.send(IoCommand::IoCheckIdle)?;
+    io_idle.recv()?;
+
+    events.send(Event::StateChange {
+        completed_turns: turn,
+        new_state: State::Quitting,
+    })?;
+
     Ok(())
 }
 
-// Example for tonic RPC
-async fn example_rpc_call(server_addr: String) -> Result<()> {
+fn write_image(
+    io_command_chan: Sender<IoCommand>,
+    io_filename_chan: Sender<String>,
+    io_output_chan: Sender<CellValue>,
+    io_idle_chan: Receiver<bool>,
+    io_events_chan: Sender<Event>,
+    p: Params,
+    coordinate_length: u32,
+    alive_cells: IndexSet<u32>,
+    turn: u32,
+) {
+    let filename = format!("{}x{}x{}", p.image_width, p.image_height, turn);
+    io_command_chan.send(IoCommand::IoOutput).unwrap();
 
-    // You can define the default server address in args::DEFAULT_SERVER_ADDR
-    // or passing the args by typing `cargo run --release -- --server_addr "127.0.0.1:8030"`
-    log::info!(target: "Distributor", "server_addr: {}", server_addr);
+    // clone because filename used again
+    io_filename_chan.send(filename.clone()).unwrap();
 
-    let mut client = ControllerHandlerClient::connect(format!("http://{}", server_addr)).await?;
-    // Create a 3x3 world
-    let world =
-        vec![vec![CellValue::Alive, CellValue::Alive, CellValue::Alive],
-             vec![CellValue::Dead, CellValue::Dead, CellValue::Dead],
-             vec![CellValue::Alive, CellValue::Alive, CellValue::Alive]];
-
-    // Convert Vec<Vec<CellValue>> to Vec<u8> (bytes)
-    let bytes = world.iter().flat_map(|row| row.as_bytes()).copied().collect();
-    assert_eq!(bytes, vec![255, 255, 255, 0, 0, 0, 255, 255, 255]);
-
-    // Push the world to the server and receive the response (number of alive cells) by RPC call
-    // the RPC call `push_world()` is defined in `proto/stub.proto`
-    let response = client.push_world(
-        tonic::Request::new(World {
-            width: 3,
-            height: 3,
-            cell_values: bytes,
-        })
-    ).await;
-
-    // Handle response
-    match response {
-        Ok(response) => {
-            let msg = response.into_inner();
-            log::info!(target: "Distributor", "response: {:?}", msg);
-            assert_eq!(
-                msg.cells_count as usize,
-                world.iter().flatten().filter(|cell| cell.is_alive()).count()
-            );
-        },
-        Err(e) => log::error!(target: "Distributor", "Server error: {}", e),
+    let indiv_coord_len = coordinate_length / 2;
+    for x in 0..p.image_width as u32 {
+        for y in 0..p.image_height as u32 {
+            // checks to see if the set of alive cells contains that coordinate
+            match alive_cells.contains::<u32>(&(x << indiv_coord_len as u32 | y)) {
+                true => {
+                    io_output_chan.send(CellValue::Alive).unwrap();
+                }
+                false => {
+                    io_output_chan.send(CellValue::Dead).unwrap();
+                }
+            }
+        }
     }
 
-    // Another example of closing the server by RPC call
-    client.shutdown_broker(tonic::Request::new(Empty { })).await?;
+    io_command_chan.send(IoCommand::IoCheckIdle).unwrap();
+    io_idle_chan.recv().unwrap();
 
-    Ok(())
+    io_events_chan
+        .send(Event::ImageOutputComplete {
+            completed_turns: turn,
+            filename,
+        })
+        .unwrap();
+}
+
+impl Coordinates for Distributor {
+    fn calc_coord_len_and_offset(image_size: u32) -> (u32, u32) {
+        let coordinate_length = || -> u32 {
+            let mask: u32 = 1;
+            let mut size = 0;
+            for i in 0..32 as u32 {
+                if image_size & (mask << i) > 0 {
+                    size = i;
+                }
+            }
+            return size * 2;
+        }();
+        let offset = 32 - coordinate_length;
+        return (coordinate_length, offset);
+    }
+
+    fn generate_mask(coordinate_length: u32) -> u32 {
+        if coordinate_length > 32 {
+            panic!("coordinate length must be less than or equal to 32");
+        }
+        let mask = !0u32;
+        mask << (32 - coordinate_length)
+    }
+
+    fn limit(coordinate_length: u32) -> usize {
+        if coordinate_length > 24 {
+            32
+        } else if coordinate_length > 16 {
+            24
+        } else if coordinate_length > 8 {
+            16
+        } else {
+            8
+        }
+    }
+}
+
+async fn calculate_alive_cells(
+    world: Arc<Mutex<IndexSet<u32>>>,
+    coordinate_length: u32,
+    params: &Params,
+) -> IndexSet<u32> {
+    let mut alive_cells = IndexSet::new();
+    let indiv_coord_len = coordinate_length / 2;
+    let world_guard = world.lock().await;
+    for y in 0..params.image_height as u32 {
+        for x in 0..params.image_width as u32 {
+            let coord = (x << indiv_coord_len as u32 | y);
+            if world_guard.contains::<u32>(&coord) {
+                alive_cells.insert(coord);
+            }
+        }
+    }
+    return alive_cells;
+}
+
+impl DistributorHelpers for Distributor {
+    /// Creates an indexed set of alive coordinates by combining the x and y value into a single value
+    ///
+    /// e.g. for a 512x512 world:
+    /// - `0000 0000 0000 00xx xxxx xxxy yyyy yyyy`
+    ///
+    /// where there are 14 offset bits, 9 x bits and 9 y bits
+    ///
+    fn initialise_world(
+        params: &Params,
+        io_command: Sender<IoCommand>,
+        io_input: Receiver<CellValue>,
+        io_filename: Sender<String>,
+        coordinate_length: u32,
+    ) -> Result<IndexSet<u32>, DecodeError> {
+        let filename = format!("{}x{}", params.image_width, params.image_height);
+        match io_command.send(IoCommand::IoInput) {
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!("{} {}", line!(), e);
+            }
+        };
+        match io_filename.send(filename) {
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!("{} {}", line!(), e);
+            }
+        };
+
+        if params.image_height != params.image_width {
+            return Err(DecodeError::Other(format!(
+                "Image is not square! Height and width values do not match"
+            )));
+        }
+        // initialise the world which is (width*bytes)x(height*bytes) in capacity
+        let size = (params.image_height as f64 * params.image_width as f64 * 0.03).ceil() as usize;
+        let mut world: IndexSet<u32> = IndexSet::with_capacity(size);
+        
+        // gets coordinate length based of image size
+        
+        let indiv_coord_len = coordinate_length / 2;
+        println!("GOING");
+
+        for x in 0..params.image_width as u32 {
+            for y in 0..params.image_height as u32 {
+                let cell = io_input.recv().unwrap();
+                println!("CELL {:?}", cell);
+                match cell {
+                    CellValue::Alive => {
+                        world.insert(x << indiv_coord_len as u32 | y);
+                    }
+                    CellValue::Dead => continue,
+                    // Err(e) => {
+                    //     return Err(DecodeError::Other(format!(
+                    //         "Error recieving from channel: {}",
+                    //         e
+                    //     )));
+                    // }
+                }
+            }
+        }
+
+        return Ok(world);
+    }
+    fn write_image(
+        io_command: Sender<IoCommand>,
+        io_output: Sender<CellValue>,
+        io_filename: Sender<String>,
+        io_idle: Receiver<bool>,
+        events: Sender<Event>,
+        params: &Params,
+        turn: u32,
+        world: &Vec<Vec<u8>>,
+    ) -> Result<(), flume::SendError<Event>> {
+        let filename = format!("{}x{}x{}", params.image_width, params.image_height, turn);
+        io_command.send(IoCommand::IoOutput).unwrap();
+        io_filename.send(filename.clone()).unwrap();
+
+        // Writes image to event channel byte by byte
+        for y in 0..params.image_height {
+            for x in 0..params.image_width {
+                if world[y][x] == 255 {
+                    match io_output.send(CellValue::Alive) {
+                        Ok(_) => {}
+                        Err(e) => {
+                            eprintln!("{} {}", line!(), e);
+                        }
+                    };
+                } else {
+                    match io_output.send(CellValue::Dead) {
+                        Ok(_) => {}
+                        Err(e) => {
+                            eprintln!("{} {}", line!(), e);
+                        }
+                    };
+                }
+            }
+        }
+
+        // Send image output completed event
+        match io_command.send(IoCommand::IoCheckIdle) {
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!("{} {}", line!(), e);
+            }
+        };
+        match io_idle.recv() {
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!("{} {}", line!(), e);
+            }
+        };
+        match events.send(Event::ImageOutputComplete {
+            completed_turns: turn,
+            filename: filename,
+        }) {
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!("{} {}", line!(), e);
+            }
+        };
+        Ok(())
+    }
+
+    fn calculate_alive_cells(world: &Vec<Vec<u8>>, params: &Params) -> Vec<CellCoord> {
+        let mut alive_cells = Vec::new();
+
+        for y in 0..params.image_height {
+            for x in 0..params.image_width {
+                if world[y][x] == 255 {
+                    alive_cells.push(CellCoord { x, y })
+                }
+            }
+        }
+        return alive_cells;
+    }
+
+    async fn handle_paused_state(
+        key_presses: Receiver<Keycode>,
+        world: &Vec<Vec<u8>>,
+        params: Params,
+        turn: u32,
+        events_clone: Sender<Event>,
+        io_command: Sender<IoCommand>,
+        io_output: Sender<CellValue>,
+        io_filename: Sender<String>,
+        io_idle: Receiver<bool>,
+        quit: &mut bool,
+    ) -> Result<(), flume::SendError<Event>> {
+        loop {
+            tokio::select! {
+                Ok(key) = key_presses.recv_async() => {
+                    match key {
+                        Keycode::P => {
+                            events_clone.send(Event::StateChange {
+                                completed_turns: turn,
+                                new_state: State::Executing,
+                            })?;
+                            break; // Exit the loop to resume execution
+                        }
+                        Keycode::Q => {
+                            *quit = true;
+                            /* match events_clone.send(Event::StateChange {
+                                completed_turns: turn,
+                                new_state: State::Quitting,
+                            }){
+                                Ok(_) => {}
+                                Err(e) => {
+                                    eprintln!("{} {}", line!(), e);
+                                }
+                            }; */
+                            break; // Exit the loop to quit
+                        }
+                        Keycode::S => {
+                            Self::write_image(
+                                io_command.clone(),
+                                io_output.clone(),
+                                io_filename.clone(),
+                                io_idle.clone(),
+                                events_clone.clone(),
+                                &params,
+                                turn,
+                                &world,
+                            ).unwrap();
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        Result::Ok(())
+    }
 }

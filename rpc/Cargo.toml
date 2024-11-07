@@ -1,0 +1,8 @@
+[package]
+name = "rpc"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+stubs = { path = "../stubs"}
+async-trait = "0.1"
