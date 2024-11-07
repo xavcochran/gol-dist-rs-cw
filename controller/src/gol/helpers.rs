@@ -40,7 +40,7 @@ pub trait DistributorHelpers {
         world: &Vec<Vec<u8>>,
     ) -> Result<(), flume::SendError<Event>>;
     /// Initialise the world which is (height)x(width) in capacity
-    fn initialise_world(
+    async fn initialise_world(
         params: &Params,
         io_command: Sender<IoCommand>,
         io_input: Receiver<CellValue>,

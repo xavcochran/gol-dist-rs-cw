@@ -58,6 +58,7 @@ pub async fn distributor(params: Params, mut channels: DistributorChannels) -> R
             io_filename.clone(),
             coordinate_length,
         )
+        .await
         .unwrap(),
     ));
     // TODO: Execute all turns of the Game of Life.
@@ -108,7 +109,7 @@ pub async fn distributor(params: Params, mut channels: DistributorChannels) -> R
             .write_data(&mut Arc::clone(&client_clone), packet_params, world_clone)
             .await
             .unwrap();
-
+        
         let header = match packet_guard
             .read_header(&mut Arc::clone(&client_clone))
             .await
@@ -299,7 +300,7 @@ impl DistributorHelpers for Distributor {
     ///
     /// where there are 14 offset bits, 9 x bits and 9 y bits
     ///
-    fn initialise_world(
+    async fn initialise_world(
         params: &Params,
         io_command: Sender<IoCommand>,
         io_input: Receiver<CellValue>,
@@ -336,7 +337,7 @@ impl DistributorHelpers for Distributor {
 
         for x in 0..params.image_width as u32 {
             for y in 0..params.image_height as u32 {
-                let cell = io_input.recv().unwrap();
+                let cell = io_input.recv_async().await.unwrap();
                 println!("CELL {:?}", cell);
                 match cell {
                     CellValue::Alive => {
