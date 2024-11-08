@@ -40,6 +40,7 @@ impl GOLRequest {
     }
 }
 
+#[derive(Debug)]
 pub struct GOLResponse {
     pub alive_count: u32,
     pub current_turn: u32,
@@ -68,16 +69,14 @@ impl GOLResponse {
 
 pub struct ProcessSliceArgs {
     pub image_size: u32,
-    pub y1: u32,
-    pub y2: u32,
     pub threads: u8,
     pub alive_cells: Arc<Mutex<IndexSet<u32>>>,
 }
 impl ProcessSliceArgs {
-    pub fn new(image_size: u32, y1:u32, y2:u32, threads:u8, capacity: usize) -> Self{
+    pub fn new(image_size: u32, threads:u8, capacity: usize) -> Self{
         Self{
-            image_size,threads,y1,y2,
-            alive_cells: Arc::new(Mutex::new(IndexSet::with_capacity(capacity)))
+            image_size,threads,
+            alive_cells: Arc::new(Mutex::new(IndexSet::with_capacity(capacity))),
         }
     }
 }
@@ -86,6 +85,7 @@ pub struct ProcessSliceGOLResponse {
     pub alive_cells: IndexSet<u32>,
 }
 
+#[derive(Debug)]
 pub struct PacketParams {
     pub turns: u32,
     pub threads: u8,

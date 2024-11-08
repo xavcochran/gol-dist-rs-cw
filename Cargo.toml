@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["broker", "controller", "worker", "stubs", "protocol", "rpc"]
+members = ["broker", "controller", "stubs", "protocol", "rpc"]
 
 
 
