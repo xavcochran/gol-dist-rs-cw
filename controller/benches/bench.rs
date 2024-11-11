@@ -7,7 +7,7 @@ fn bench_gol(c: &mut Criterion) {
     group
         .sampling_mode(criterion::SamplingMode::Flat)
         .sample_size(10);
-    for thread in 1..=num_cpus::get() {
+    for thread in 6..=num_cpus::get() {
         group.bench_with_input(
             BenchmarkId::new("Threads", thread),
             &thread,

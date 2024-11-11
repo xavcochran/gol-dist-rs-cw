@@ -27,15 +27,16 @@ impl Worker {
         &self,
         request: ProcessSliceArgs,
     ) -> Result<ProcessSliceGOLResponse, RpcError> {
+        println!("NEW REQUEST, {}, {}, {} - {}", request.image_size, request.threads, request.y1, request.y2);
         // take in slice params
         // process game of life on slice
         let alive_cells = request.alive_cells.lock().await;
         let mut new_slice = IndexSet::with_capacity(alive_cells.len());
         let (coordinate_length, _) = Worker::calc_coord_len_and_offset(request.image_size);
-        // for every x and y in image size and within slice boun
+        // for every x and y in image size and within slice bound
         for x in 0..request.image_size {
             for y in request.y1..=request.y2 {
-                let xy = x << coordinate_length | y;
+                let xy = x << coordinate_length/2 | y as u32;
                 let is_alive = alive_cells.contains(&xy);
 
                 let num_neighbours = match alive_cells.neighbours(xy, request.image_size) {
@@ -60,7 +61,7 @@ impl Worker {
 }
 #[tokio::main]
 pub async fn main() -> Result<(), WorkerErr> {
-    let ip_addr = "127.0.0.1:8081".to_string();
+    let ip_addr = "127.0.0.1:8086".to_string();
 
     // send connection request to broker
     // on success send subscription request to broker
@@ -90,76 +91,110 @@ pub async fn main() -> Result<(), WorkerErr> {
     };
 
     let worker = Worker::new();
-
+    let worker_ip = ip_addr.clone().to_string();
     let listener_handle = tokio::spawn(async move {
         match ln.accept().await {
-            Ok((client, socket_address)) => {
+            Ok((broker_client, socket_address)) => {
                 println!(
                     "Successfully accepted connection on port {:?}",
                     socket_address
                 );
 
-                let mut client_clone = Arc::new(Mutex::new(client));
-                let handle = tokio::spawn(async move {
-                    let mut packet = Packet::new();
-                    // read tcp stream and handle connection
-                    // read header then handle function call
-                    let client = client_clone.lock().await;
-                    client.readable().await.unwrap();
-                    drop(client);
-                    let header = tokio::select! {
-                        result = packet.read_header(&mut client_clone) => {
-                            println!("EIWEOJNKJCEN");
-                            match result {
-                                Ok(header) => header,
-                                Err(e) => {
-                                    return Err(WorkerErr::Other(format!(
-                                        "Error running Process Gol {}",
-                                        e
-                                    )));
+                let mut broker_client_clone = Arc::new(Mutex::new(broker_client));
+                let handle: tokio::task::JoinHandle<Result<(), WorkerErr>> = tokio::spawn(async move {
+                    loop {
+                        let mut packet = Packet::new();
+                        // read tcp stream and handle connection
+                        // read header then handle function call
+                        let header = tokio::select! {
+                            result = packet.read_header(&mut broker_client_clone) => {
+                                match result {
+                                    Ok(header) => header,
+                                    Err(e) => {
+                                        return Err(WorkerErr::Other(format!(
+                                            "Error running Process Gol {}",
+                                            e
+                                        )));
+                                    }
                                 }
+                            },
+                            else => {
+                                return Err(WorkerErr::Other(String::from("Client connection closed")));
                             }
-                        },
-                        else => {
-                            return Err(WorkerErr::Other(String::from("Client connection closed")));
-                        }
-                    };
-                    match header.call_type {
-                        CallType::Rpc => match header.fn_call_id {
-                            FunctionCall::PROCESS_SLICE => {
-                                match packet
-                                    .read_to_worker_payload(&mut Arc::clone(&client_clone), header)
-                                    .await
-                                {
-                                    Ok(payload) => {
-                                        match worker
-                                            .handle_rpc_call(FunctionCall::PROCESS_SLICE, payload)
-                                            .await
-                                        {
-                                            Ok(_) => {}
-                                            Err(e) => {
-                                                return Err(WorkerErr::Other(format!(
-                                                    "Error running Process Gol {}",
-                                                    e
-                                                )))
+                        };
+                        match header.call_type {
+                            CallType::Rpc => match header.fn_call_id {
+                                FunctionCall::PROCESS_SLICE => {
+                                    match packet
+                                        .read_to_worker_payload(
+                                            &mut Arc::clone(&broker_client_clone),
+                                            header.clone(),
+                                        )
+                                        .await
+                                    {
+                                        Ok(payload) => {
+
+                                            match worker
+                                                .handle_rpc_call(
+                                                    FunctionCall::PROCESS_SLICE,
+                                                    payload,
+                                                )
+                                                .await
+                                            {
+                                                Ok(response) => {
+                                                    let params = PacketParams {
+                                                        call_type: u8::from(CallType::WorkerResp),
+                                                        turns: header.turns,
+                                                        threads: header.threads,
+                                                        y1: header.y1,
+                                                        y2: header.y2,
+                                                        sender_ip: worker_ip.clone(),
+                                                        fn_call_id: FunctionCall::NONE,
+                                                        msg_id: 0,
+                                                        image_size: header.image_size,
+                                                    };
+                                                    match packet
+                                                        .write_data(
+                                                            &mut Arc::clone(&broker_client_clone),
+                                                            params,
+                                                            Arc::new(Mutex::new(response.alive_cells)),
+                                                        )
+                                                        .await
+                                                    {
+                                                        Ok(_) => {
+                                                        }
+                                                        Err(e) => {
+                                                            return Err(WorkerErr::Other(format!(
+                                                                "Error writing data to client {}",
+                                                                e
+                                                            )))
+                                                        }
+                                                    };
+                                                }
+                                                Err(e) => {
+                                                    return Err(WorkerErr::Other(format!(
+                                                        "Error running Process Gol {}",
+                                                        e
+                                                    )))
+                                                }
                                             }
                                         }
+                                        Err(err) => return Err(WorkerErr::from(err)),
                                     }
-                                    Err(err) => return Err(WorkerErr::from(err)),
                                 }
-                            }
-                            FunctionCall::KILL => {
-                                return Err(WorkerErr::Other(format!("Call not handled")));
-                            }
+                                FunctionCall::KILL => {
+                                    return Err(WorkerErr::Other(format!("Call not handled")));
+                                }
+                                _ => {
+                                    return Err(WorkerErr::Other(format!("Call not handled")));
+                                }
+                            },
                             _ => {
                                 return Err(WorkerErr::Other(format!("Call not handled")));
                             }
-                        },
-                        _ => {
-                            return Err(WorkerErr::Other(format!("Call not handled")));
-                        }
-                    };
-                    Ok(())
+                        };
+
+                    }
                 });
                 let _ = handle.await.unwrap();
             }
@@ -174,6 +209,7 @@ pub async fn main() -> Result<(), WorkerErr> {
     });
 
     let params = PacketParams {
+        call_type: u8::from(CallType::Rpc),
         turns: 0,
         threads: 0,
         sender_ip: ip_addr,
@@ -185,7 +221,6 @@ pub async fn main() -> Result<(), WorkerErr> {
     };
 
     let packet = Packet::new();
-    println!("send subscription");
     match packet
         .write_data(
             &mut Arc::new(Mutex::new(client)),
@@ -251,7 +286,7 @@ impl WorkerRpcHandler for Worker {
         request: ProcessSliceArgs,
     ) -> Result<ProcessSliceGOLResponse, RpcError> {
         match id {
-            FunctionCall::SUBSCRIBE => self.process_slice(request).await,
+            FunctionCall::PROCESS_SLICE => self.process_slice(request).await,
             _ => return Err(RpcError::HandlerNotFound),
         }
     }

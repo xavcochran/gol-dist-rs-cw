@@ -3,6 +3,7 @@ use std::sync::Arc;
 use indexmap::IndexSet;
 use tokio::sync::Mutex;
 
+
 #[derive(Clone, Debug)]
 pub struct Params {
     pub incoming_ip_address: String,
@@ -40,6 +41,7 @@ impl GOLRequest {
     }
 }
 
+#[derive(Debug)]
 pub struct GOLResponse {
     pub alive_count: u32,
     pub current_turn: u32,
@@ -66,27 +68,34 @@ impl GOLResponse {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct ProcessSliceArgs {
     pub image_size: u32,
-    pub y1: u32,
-    pub y2: u32,
     pub threads: u8,
+    pub y1: u16,
+    pub y2: u16,
     pub alive_cells: Arc<Mutex<IndexSet<u32>>>,
 }
 impl ProcessSliceArgs {
-    pub fn new(image_size: u32, y1:u32, y2:u32, threads:u8, capacity: usize) -> Self{
-        Self{
-            image_size,threads,y1,y2,
-            alive_cells: Arc::new(Mutex::new(IndexSet::with_capacity(capacity)))
+    pub fn new(image_size: u32, threads: u8, y1: u16, y2: u16, capacity: usize) -> Self {
+        Self {
+            image_size,
+            threads,
+            y1,
+            y2,
+            alive_cells: Arc::new(Mutex::new(IndexSet::with_capacity(capacity))),
         }
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct ProcessSliceGOLResponse {
     pub alive_cells: IndexSet<u32>,
 }
 
+#[derive(Debug)]
 pub struct PacketParams {
+    pub call_type: u8,
     pub turns: u32,
     pub threads: u8,
     pub sender_ip: String,

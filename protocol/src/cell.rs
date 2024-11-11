@@ -14,23 +14,40 @@ impl Cell for IndexSet<u32> {
         //     Some(coordinate) => coordinate,
         //     None => return None,
         // };
+        let coord_bits = (image_size as f32).log2() as u32;
+        let x = xy >> coord_bits;
+        let y = xy & ((1 << coord_bits) - 1);
+        
+        // Skip if coordinates are out of bounds
+        if x >= image_size || y >= image_size {
+            return Some(0);
+        }
 
-        let neighbour_positions = vec![
-            (xy + 512) % image_size, // right
-            (xy - 512) % image_size, // left
-            (xy + 1) % image_size,   // up
-            (xy - 1) % image_size,   // down
-            (xy + 513) % image_size, // right up
-            (xy + 511) % image_size, // right down
-            (xy - 511) % image_size, // left down
-            (xy - 513) % image_size, // left up
-        ];
-
-        for &pos in &neighbour_positions {
-            if self.contains(&pos) {
-                live_neighbours += 1;
+        let i32_image= image_size as i32;
+        // Check each neighbor only if it would be within bounds
+        for dx in -1..=1i32 {
+            for dy in -1..=1i32 {
+                // Skip the cell itself
+                if dx == 0 && dy == 0 {
+                    continue;
+                }
+                
+                // Calculate potential neighbor coordinates
+                let new_x = (x as i32 + dx + i32_image) % i32_image;
+                let new_y = (y as i32 + dy + i32_image) %i32_image;
+                
+                // Check bounds
+                if new_x >= 0 && new_x < image_size as i32 && 
+                   new_y >= 0 && new_y < image_size as i32 {
+                    // Combine coordinates back into single value
+                    let neighbor = ((new_x as u32) << coord_bits) | (new_y as u32);
+                    if self.contains(&neighbor) {
+                        live_neighbours += 1;
+                    }
+                }
             }
         }
+
 
         Some(live_neighbours)
     }

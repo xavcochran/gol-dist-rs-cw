@@ -1,6 +1,3 @@
-
-
-use std::sync::Arc;
 use crate::gol::distributor_error::DistributorErr;
 use crate::gol::event::{Event, State};
 use crate::gol::io::IoCommand;
@@ -10,9 +7,10 @@ use anyhow::{anyhow, Result};
 use flume::{Receiver, Sender};
 use indexmap::IndexSet;
 use protocol::coordinates::Coordinates;
-use protocol::function_call::FunctionCall;
+use protocol::function_call::{CallType, FunctionCall};
 use protocol::packet::{DecodeError, Packet};
 use sdl2::keyboard::Keycode;
+use std::sync::Arc;
 use stubs::{GOLResponse, PacketParams};
 use tokio::{
     self,
@@ -46,7 +44,7 @@ pub async fn distributor(params: Params, mut channels: DistributorChannels) -> R
 
     // TODO: Create a 2D vector to store the world.
     let packet = Arc::new(Mutex::new(Packet::new()));
-    let turn = 0;
+    let mut turn = 0;
 
     let (coordinate_length, _) = Distributor::calc_coord_len_and_offset(params.image_height as u32);
     println!("PREPROCESSING");
@@ -96,6 +94,7 @@ pub async fn distributor(params: Params, mut channels: DistributorChannels) -> R
     println!("SENDING REQUEST");
     tokio::spawn(async move {
         let packet_params = PacketParams {
+            call_type: u8::from(CallType::Rpc),
             turns: params.turns as u32,
             threads: params.threads as u8,
             y1: 0,
@@ -110,7 +109,7 @@ pub async fn distributor(params: Params, mut channels: DistributorChannels) -> R
             .write_data(&mut Arc::clone(&client_clone), packet_params, world_clone)
             .await
             .unwrap();
-
+        println!("SUCCESSFULLY WROTE DATA");
         let header = match packet_guard
             .read_header(&mut Arc::clone(&client_clone))
             .await
@@ -131,8 +130,8 @@ pub async fn distributor(params: Params, mut channels: DistributorChannels) -> R
                 return Err(anyhow!("Error decoding header: {}", e));
             }
         };
-        response_sender_clone.send(response).unwrap();
-        drop(packet_guard);
+        response_sender_clone.send_async(response).await.unwrap();
+        drop(packet_guard); 
         Ok(())
     });
 
@@ -147,6 +146,7 @@ pub async fn distributor(params: Params, mut channels: DistributorChannels) -> R
                     }
                 };
                 world = Arc::new(Mutex::new(gol_resp.world));
+                turn = gol_resp.current_turn;
                 break
             }
         };
@@ -156,21 +156,26 @@ pub async fn distributor(params: Params, mut channels: DistributorChannels) -> R
      * FINALISE GAME
      */
     // TODO: Report the final state using FinalTurnCompleteEvent.
-    let live_cells = calculate_alive_cells(Arc::clone(&world), coordinate_length, &params).await;
-
     let indiv_coord_len = coordinate_length / 2;
-    let mask = Distributor::generate_mask(indiv_coord_len);
-    events.send(Event::FinalTurnComplete {
-        completed_turns: turn,
-        alive: live_cells
-            .iter()
-            .map(|xy| -> CellCoord<usize> {
-                let x = (*xy >> indiv_coord_len) as usize;
-                let y = (*xy & mask) as usize;
-                CellCoord { x, y }
-            })
-            .collect(),
-    })?;
+    let mask = (1 << indiv_coord_len) - 1;
+
+    let mut world_guard = world.lock().await;
+  
+
+    events
+        .send(Event::FinalTurnComplete {
+            completed_turns: turn,
+            alive: world_guard
+                .iter()
+                .map(|xy| -> CellCoord<usize> {
+                    let x = (*xy >> indiv_coord_len) as usize;
+                    let y = (*xy & mask) as usize;
+                    CellCoord { x, y }
+                })
+                .collect(),
+        })
+        .unwrap();
+    println!("WRITING IMAGE");
     write_image(
         io_command.clone(),
         io_filename.clone(),
@@ -179,22 +184,25 @@ pub async fn distributor(params: Params, mut channels: DistributorChannels) -> R
         events.clone(),
         params,
         coordinate_length,
-        live_cells,
+        std::mem::take(&mut world_guard),
         turn,
-    );
+    )
+    .await;
+    println!("FINISHED");
     // Make sure that the Io has finished any output before exiting.
-    io_command.send(IoCommand::IoCheckIdle)?;
-    io_idle.recv()?;
+    io_command.send_async(IoCommand::IoCheckIdle).await?;
+    io_idle.recv_async().await?;
 
-    events.send(Event::StateChange {
-        completed_turns: turn,
-        new_state: State::Quitting,
-    })?;
-
+    events
+        .send_async(Event::StateChange {
+            completed_turns: turn,
+            new_state: State::Quitting,
+        })
+        .await?;
     Ok(())
 }
 
-fn write_image(
+async fn write_image(
     io_command_chan: Sender<IoCommand>,
     io_filename_chan: Sender<String>,
     io_output_chan: Sender<CellValue>,
@@ -206,34 +214,39 @@ fn write_image(
     turn: u32,
 ) {
     let filename = format!("{}x{}x{}", p.image_width, p.image_height, turn);
-    io_command_chan.send(IoCommand::IoOutput).unwrap();
+    io_command_chan.send_async(IoCommand::IoOutput).await.unwrap();
 
     // clone because filename used again
-    io_filename_chan.send(filename.clone()).unwrap();
-
+    io_filename_chan.send_async(filename.clone()).await.unwrap();
+    println!("WRITING CELLS");
     let indiv_coord_len = coordinate_length / 2;
     for x in 0..p.image_width as u32 {
         for y in 0..p.image_height as u32 {
+            // println!("{:?}", (x << indiv_coord_len as u32 | y));
             // checks to see if the set of alive cells contains that coordinate
             match alive_cells.contains::<u32>(&(x << indiv_coord_len as u32 | y)) {
                 true => {
-                    io_output_chan.send(CellValue::Alive).unwrap();
+                    io_output_chan.send_async(CellValue::Alive).await.unwrap();
                 }
                 false => {
-                    io_output_chan.send(CellValue::Dead).unwrap();
+                    io_output_chan.send_async(CellValue::Dead).await.unwrap();
                 }
             }
         }
     }
-
-    io_command_chan.send(IoCommand::IoCheckIdle).unwrap();
-    io_idle_chan.recv().unwrap();
+    println!("FINISHED WRITING");
+    io_command_chan
+        .send_async(IoCommand::IoCheckIdle)
+        .await
+        .unwrap();
+    io_idle_chan.recv_async().await.unwrap();
 
     io_events_chan
-        .send(Event::ImageOutputComplete {
+        .send_async(Event::ImageOutputComplete {
             completed_turns: turn,
             filename,
         })
+        .await
         .unwrap();
 }
 
@@ -331,16 +344,15 @@ impl DistributorHelpers for Distributor {
         // initialise the world which is (width*bytes)x(height*bytes) in capacity
         let size = (params.image_height as f64 * params.image_width as f64 * 0.03).ceil() as usize;
         let mut world: IndexSet<u32> = IndexSet::with_capacity(size);
-        
+
         // gets coordinate length based of image size
-        
+
         let indiv_coord_len = coordinate_length / 2;
         println!("GOING");
 
-        for x in 0..params.image_width as u32 {
-            for y in 0..params.image_height as u32 {
+        for y in 0..params.image_height as u32 {
+            for x in 0..params.image_width as u32 {
                 let cell = io_input.recv_async().await.unwrap();
-                println!("CELL {:?}", cell);
                 match cell {
                     CellValue::Alive => {
                         world.insert(x << indiv_coord_len as u32 | y);

@@ -2,8 +2,10 @@ use flume::{Receiver, Sender};
 use indexmap::IndexSet;
 
 extern crate stubs;
+
 use stubs::{GOLResponse, ProcessSliceArgs};
 
+#[derive(Debug, Clone)]
 pub struct Job {
     pub args: ProcessSliceArgs,
     pub return_chan_tx: Sender<GOLResponse>,
@@ -15,7 +17,7 @@ pub struct Jobs {
 }
 impl Jobs {
     pub fn new(threads: usize) -> Self {
-        let (job_chan_tx, job_chan_rx) = flume::bounded::<Job>(threads);
+        let (job_chan_tx, job_chan_rx) = flume::unbounded::<Job>();
         return Self {
             job_chan_tx,
             job_chan_rx,
