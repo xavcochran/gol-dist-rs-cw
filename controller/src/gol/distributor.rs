@@ -65,7 +65,7 @@ pub async fn distributor(params: Params, mut channels: DistributorChannels) -> R
     let (result_chan_tx, result_chan_rx) = flume::unbounded::<GOLResponse>();
     println!("CONNECTING");
     // Connect to broker
-    let broker_addr = "127.0.0.1:8030".to_string();
+    let broker_addr = "3.85.36.243:8030".to_string();
     let client = match net::TcpStream::connect(broker_addr.clone()).await {
         Ok(conn) => {
             println!("Successfully connected to broker",);
